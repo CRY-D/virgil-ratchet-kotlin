@@ -35,34 +35,21 @@ package com.virgilsecurity.ratchet.securechat.keysrotation
 
 import com.virgilsecurity.crypto.ratchet.RatchetKeyId
 import com.virgilsecurity.ratchet.*
-import com.virgilsecurity.sdk.cards.Card
-import com.virgilsecurity.sdk.cards.CardManager
-import com.virgilsecurity.sdk.cards.validation.VirgilCardVerifier
-import com.virgilsecurity.sdk.client.VirgilCardClient
-import com.virgilsecurity.sdk.common.TimeSpan
 import com.virgilsecurity.sdk.crypto.*
-import com.virgilsecurity.sdk.jwt.JwtGenerator
-import com.virgilsecurity.sdk.jwt.TokenContext
-import com.virgilsecurity.sdk.jwt.accessProviders.CachingJwtProvider
-import com.virgilsecurity.sdk.jwt.contract.AccessTokenProvider
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.util.concurrent.TimeUnit
 import java.util.logging.Logger
 
 class KeysRotatorTest {
 
     private lateinit var keyId: RatchetKeyId
     private lateinit var crypto: VirgilCrypto
-    private lateinit var cardManager: CardManager
-    private lateinit var tokenProvider: AccessTokenProvider
-    private lateinit var generator: JwtGenerator
     private lateinit var identity: String
     private lateinit var privateKey: VirgilPrivateKey
-    private lateinit var card: Card
+    private lateinit var publicKey: VirgilPublicKey
 
     @BeforeEach
     fun setup() {
@@ -71,28 +58,8 @@ class KeysRotatorTest {
 
         val identityKeyPair = this.crypto.generateKeyPair(KeyPairType.ED25519)
         this.identity = generateIdentity()
-        this.privateKey = TestConfig.appPrivateKey
-        this.generator = JwtGenerator(
-                TestConfig.appId,
-                this.privateKey,
-                TestConfig.appPublicKeyId,
-                TimeSpan.fromTime(30, TimeUnit.MINUTES),
-                VirgilAccessTokenSigner(this.crypto)
-        )
-
-        this.tokenProvider = CachingJwtProvider(CachingJwtProvider.RenewJwtCallback {
-            return@RenewJwtCallback generator.generateToken(identity)
-        })
-        val cardVerifier = VirgilCardVerifier(VirgilCardCrypto(crypto), true, false)
-
-        this.cardManager = CardManager(
-                VirgilCardCrypto(this.crypto),
-                this.tokenProvider,
-                cardVerifier,
-                VirgilCardClient(TestConfig.cardsServiceURL)
-        )
-
-        this.card = this.cardManager.publishCard(identityKeyPair.privateKey, identityKeyPair.publicKey)
+        this.privateKey = identityKeyPair.privateKey
+        this.publicKey = identityKeyPair.publicKey
     }
 
     @Test
@@ -101,15 +68,21 @@ class KeysRotatorTest {
 
         val fakeLongTermKeysStorage = InMemoryLongTermKeysStorage()
         val fakeOneTimeKeysStorage = InMemoryOneTimeKeysStorage()
-        val fakeClient = InMemoryRatchetClient(this.cardManager)
+        val fakeClient = InMemoryRatchetClient()
+        fakeClient.currentIdentity = this.identity
+        val userStore = fakeClient.UserStore()
+        userStore.identityPublicKey = this.publicKey
+        userStore.identityPublicKeyData = this.crypto.exportPublicKey(this.publicKey)
+        fakeClient.users[this.identity] = userStore
 
         val rotator = KeysRotator(
-                this.crypto, this.privateKey, this.card.identifier,
+                this.crypto, this.privateKey,
                 100, 100, 100, numberOfOneTimeKeys,
                 fakeLongTermKeysStorage, fakeOneTimeKeysStorage, fakeClient
         )
 
-        val log = rotate(rotator, this.tokenProvider)
+        val rotationResult = rotator.rotateKeys().get()
+        val log = rotationResult.rotationLog
 
         Assertions.assertEquals(1, log.longTermKeysRelevant)
         Assertions.assertEquals(1, log.longTermKeysAdded)
@@ -125,6 +98,9 @@ class KeysRotatorTest {
         Assertions.assertEquals(1, fakeLongTermKeysStorage.map.size)
         Assertions.assertEquals(1, fakeClient.users.size)
 
+        // Upload keys manually as required by the new flow
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+
         val user = fakeClient.users.entries.first()
         Assertions.assertEquals(this.identity, user.key)
         Assertions.assertTrue(compareCloudAndStorage(user.value, fakeLongTermKeysStorage, fakeOneTimeKeysStorage))
@@ -135,19 +111,27 @@ class KeysRotatorTest {
         val numberOfOneTimeKeys = 5
         val fakeLongTermKeysStorage = InMemoryLongTermKeysStorage()
         val fakeOneTimeKeysStorage = InMemoryOneTimeKeysStorage()
-        val fakeClient = InMemoryRatchetClient(cardManager)
+        val fakeClient = InMemoryRatchetClient()
+        fakeClient.currentIdentity = this.identity
+        val userStore = fakeClient.UserStore()
+        userStore.identityPublicKey = this.publicKey
+        userStore.identityPublicKeyData = this.crypto.exportPublicKey(this.publicKey)
+        fakeClient.users[this.identity] = userStore
 
         val rotator = KeysRotator(
-                this.crypto, this.privateKey, this.card.identifier,
+                this.crypto, this.privateKey,
                 100, 5, 2, numberOfOneTimeKeys,
                 fakeLongTermKeysStorage, fakeOneTimeKeysStorage, fakeClient
         )
 
-        rotate(rotator, this.tokenProvider)
+        var rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
 
         Thread.sleep(6000)
 
-        val log1 = rotate(rotator, this.tokenProvider)
+        rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+        val log1 = rotationResult.rotationLog
 
         Assertions.assertEquals(1, log1.longTermKeysRelevant)
         Assertions.assertEquals(1, log1.longTermKeysAdded)
@@ -166,7 +150,9 @@ class KeysRotatorTest {
 
         Thread.sleep(2000)
 
-        val log2 = rotate(rotator, this.tokenProvider)
+        rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+        val log2 = rotationResult.rotationLog
 
         Assertions.assertEquals(1, log2.longTermKeysRelevant)
         Assertions.assertEquals(0, log2.longTermKeysAdded)
@@ -187,21 +173,27 @@ class KeysRotatorTest {
 
         val fakeLongTermKeysStorage = InMemoryLongTermKeysStorage()
         val fakeOneTimeKeysStorage = InMemoryOneTimeKeysStorage()
-        val fakeClient = InMemoryRatchetClient(this.cardManager)
+        val fakeClient = InMemoryRatchetClient()
+        fakeClient.currentIdentity = this.identity
+        val userStore = fakeClient.UserStore()
+        userStore.identityPublicKey = this.publicKey
+        userStore.identityPublicKeyData = this.crypto.exportPublicKey(this.publicKey)
+        fakeClient.users[this.identity] = userStore
 
         val rotator = KeysRotator(
-                this.crypto, this.privateKey, this.card.identifier,
+                this.crypto, this.privateKey,
                 5, 100, 100, numberOfOneTimeKeys,
                 fakeLongTermKeysStorage, fakeOneTimeKeysStorage, fakeClient
         )
 
-        rotate(rotator, this.tokenProvider)
+        var rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
 
-        val token = this.generator.generateToken(this.identity)
+        fakeClient.getPublicKeySet(this.identity).get()
 
-        fakeClient.getPublicKeySet(token.identity, token.stringRepresentation()).get()
-
-        val log1 = rotate(rotator, tokenProvider)
+        rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+        val log1 = rotationResult.rotationLog
 
         Assertions.assertEquals(numberOfOneTimeKeys, log1.oneTimeKeysRelevant)
         Assertions.assertEquals(1, log1.oneTimeKeysAdded)
@@ -214,7 +206,9 @@ class KeysRotatorTest {
 
         Thread.sleep(6000)
 
-        val log2 = rotate(rotator, this.tokenProvider)
+        rotationResult = rotator.rotateKeys().get()
+        fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+        val log2 = rotationResult.rotationLog
 
         Assertions.assertEquals(numberOfOneTimeKeys, log2.oneTimeKeysRelevant)
         Assertions.assertEquals(0, log2.oneTimeKeysAdded)
@@ -230,13 +224,6 @@ class KeysRotatorTest {
         Assertions.assertEquals(this.identity, user.key)
 
         Assertions.assertTrue(compareCloudAndStorage(user.value, fakeLongTermKeysStorage, fakeOneTimeKeysStorage))
-    }
-
-    private fun rotate(rotator: KeysRotator, tokenProvider: AccessTokenProvider): RotationLog {
-        val tokenContext = TokenContext("ratchet", "rotate")
-        val jwt = tokenProvider.getToken(tokenContext)
-
-        return rotator.rotateKeys(jwt).get()
     }
 
     private fun compareCloudAndStorage(

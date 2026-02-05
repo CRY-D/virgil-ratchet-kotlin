@@ -33,60 +33,17 @@
 
 package com.virgilsecurity.ratchet.securechat
 
-import com.virgilsecurity.ratchet.client.RatchetClientInterface
-import com.virgilsecurity.sdk.crypto.VirgilCrypto
-import com.virgilsecurity.sdk.crypto.VirgilKeyPair
+import com.virgilsecurity.sdk.crypto.VirgilPublicKey
 
 /**
- * Context for [SecureChat].
+ * Ratchet participant.
+ *
+ * @property identity Participant identity.
+ * @property publicKey Participant public key.
+ * @property identifier Participant identifier (e.g. Card ID).
  */
-class SecureChatContext {
-
-    val identity: String
-    val identityKeyPair: VirgilKeyPair
-    val rootPath: String?
-    val virgilCrypto: VirgilCrypto
-    val ratchetClient: RatchetClientInterface?
-
-    /**
-     * Create new instance.
-     *
-     * @param identity User's identity.
-     * @param identityKeyPair User's identity key pair.
-     * @param rootPath Root path for storages.
-     * @param virgilCrypto VirgilCrypto instance.
-     * @param ratchetClient Ratchet client.
-     */
-    @JvmOverloads
-    constructor(identity: String,
-                identityKeyPair: VirgilKeyPair,
-                rootPath: String? = null,
-                virgilCrypto: VirgilCrypto = VirgilCrypto(),
-                ratchetClient: RatchetClientInterface? = null) {
-        this.identity = identity
-        this.identityKeyPair = identityKeyPair
-        this.rootPath = rootPath
-        this.virgilCrypto = virgilCrypto
-        this.ratchetClient = ratchetClient
-    }
-
-    /**
-     * Time that one-time key lives in the storage after been marked as orphaned in seconds.
-     */
-    var orphanedOneTimeKeyTtl = 24 * 60 * 60
-
-    /**
-     * Time that long-term key is been used before rotation in seconds.
-     */
-    var longTermKeyTtl = 5 * 24 * 60 * 60
-
-    /**
-     * Time that long-term key lives in the storage after been marked as outdated in seconds.
-     */
-    var outdatedLongTermKeyTtl = 24 * 60 * 60
-
-    /**
-     * Desired number of one-time keys.
-     */
-    var desiredNumberOfOneTimeKeys = 100
-}
+data class RatchetParticipant(
+    val identity: String,
+    val publicKey: VirgilPublicKey,
+    val identifier: ByteArray
+)

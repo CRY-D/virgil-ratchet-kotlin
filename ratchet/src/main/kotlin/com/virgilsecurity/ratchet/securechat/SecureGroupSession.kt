@@ -34,14 +34,10 @@
 package com.virgilsecurity.ratchet.securechat
 
 import com.virgilsecurity.crypto.ratchet.*
-import com.virgilsecurity.ratchet.exception.HexEncodingException
 import com.virgilsecurity.ratchet.exception.SecureGroupSessionException
 import com.virgilsecurity.ratchet.utils.hexEncodedString
-import com.virgilsecurity.ratchet.utils.hexStringToByteArray
-import com.virgilsecurity.sdk.cards.Card
 import com.virgilsecurity.sdk.crypto.VirgilCrypto
 import com.virgilsecurity.sdk.crypto.VirgilPublicKey
-import com.virgilsecurity.sdk.utils.ConvertionUtils
 import java.nio.charset.StandardCharsets
 
 class SecureGroupSession {
@@ -55,7 +51,7 @@ class SecureGroupSession {
             privateKeyData: ByteArray,
             myId: ByteArray,
             ratchetGroupMessage: RatchetGroupMessage,
-            cards: List<Card>
+            participants: List<RatchetParticipant>
     ) {
         this.crypto = crypto
 
@@ -64,17 +60,11 @@ class SecureGroupSession {
         this.ratchetGroupSession.setPrivateKey(privateKeyData)
         this.ratchetGroupSession.myId = myId
 
-        val info = RatchetGroupParticipantsInfo(cards.size.toLong())
+        val info = RatchetGroupParticipantsInfo(participants.size.toLong())
 
-        cards.forEach { card ->
-            val participantId = card.identifier.hexStringToByteArray()
-
-            if (card.publicKey !is VirgilPublicKey) {
-                throw SecureGroupSessionException(SecureGroupSessionException.PUBLIC_KEY_IS_NOT_VIRGIL,
-                                                  "Card public key should be a VirgilPublicKey")
-            }
-            val publicKey = card.publicKey as VirgilPublicKey
-            val publicKeyData = this.crypto.exportPublicKey(publicKey)
+        participants.forEach { participant ->
+            val participantId = participant.identifier
+            val publicKeyData = this.crypto.exportPublicKey(participant.publicKey)
 
             info.addParticipant(participantId, publicKeyData)
         }
@@ -104,10 +94,10 @@ class SecureGroupSession {
     }
 
     /**
-     * User identity card id.
+     * User identifier.
      */
-    fun myIdentifier(): String {
-        return this.ratchetGroupSession.myId.hexEncodedString()
+    fun myIdentifier(): ByteArray {
+        return this.ratchetGroupSession.myId
     }
 
     /**
@@ -151,17 +141,12 @@ class SecureGroupSession {
      * This operation changes session state, so session should be updated in storage.
      *
      * @param message RatchetGroupMessage.
-     * @param senderCardId Sender card id.
+     * @param senderId Sender id.
      * @return Decrypted data.
      */
-    fun decryptData(message: RatchetGroupMessage, senderCardId: String): ByteArray {
+    fun decryptData(message: RatchetGroupMessage, senderId: ByteArray): ByteArray {
         if (message.type != GroupMsgType.REGULAR) {
             throw SecureGroupSessionException(SecureGroupSessionException.INVALID_MESSAGE_TYPE, "Message should be a REGULAR type")
-        }
-        val senderId = try {
-            ConvertionUtils.hexToBytes(senderCardId)
-        } catch (exception: IllegalArgumentException) {
-            throw SecureGroupSessionException(SecureGroupSessionException.INVALID_CARD_ID)
         }
 
         synchronized(syncObj) {
@@ -174,11 +159,11 @@ class SecureGroupSession {
      * This operation changes session state, so session should be updated in storage.
      *
      * @param message RatchetGroupMessage.
-     * @param senderCardId Sender card id.
+     * @param senderId Sender id.
      * @return Decrypted utf-8 string.
      */
-    fun decryptString(message: RatchetGroupMessage, senderCardId: String): String {
-        val data = this.decryptData(message, senderCardId)
+    fun decryptString(message: RatchetGroupMessage, senderId: ByteArray): String {
+        val data = this.decryptData(message, senderId)
         return data.toString(StandardCharsets.UTF_8)
     }
 
@@ -193,31 +178,20 @@ class SecureGroupSession {
      * Sets participants.
      *
      * @param ticket Ticket.
-     * @param cards Participants to set.
+     * @param participants Participants to set.
      */
-    fun setParticipants(ticket: RatchetGroupMessage, cards: List<Card>) {
+    fun setParticipants(ticket: RatchetGroupMessage, participants: List<RatchetParticipant>) {
         if (ticket.type != GroupMsgType.GROUP_INFO) {
             throw SecureGroupSessionException(SecureGroupSessionException.INVALID_MESSAGE_TYPE, "Ticket should be a GROUP_INFO type")
         }
 
-        val info = RatchetGroupParticipantsInfo(cards.size.toLong())
+        val info = RatchetGroupParticipantsInfo(participants.size.toLong())
 
-        cards.forEach { card ->
-            try {
-                val participantId = card.identifier.hexStringToByteArray()
+        participants.forEach { participant ->
+            val participantId = participant.identifier
+            val publicKeyData = this.crypto.exportPublicKey(participant.publicKey)
 
-                if (card.publicKey !is VirgilPublicKey) {
-                    throw SecureGroupSessionException(SecureGroupSessionException.PUBLIC_KEY_IS_NOT_VIRGIL)
-                }
-                val publicKeyData = this.crypto.exportPublicKey(card.publicKey as VirgilPublicKey)
-
-                info.addParticipant(participantId, publicKeyData)
-            } catch (e: HexEncodingException) {
-                throw SecureGroupSessionException(
-                        SecureGroupSessionException.INVALID_CARD_ID,
-                        "Card identifier is not HEX encoded"
-                )
-            }
+            info.addParticipant(participantId, publicKeyData)
         }
         this.ratchetGroupSession.setupSessionState(ticket, info)
     }
@@ -230,10 +204,12 @@ class SecureGroupSession {
      * Otherwise, use setParticipants().
      *
      * @param ticket Ticket.
-     * @param addCards Participants to add.
-     * @param removeCardIds Participants to remove.
+     * @param addParticipants Participants to add.
+     * @param removeParticipantIds Participants to remove.
      */
-    fun updateParticipants(ticket: RatchetGroupMessage, addCards: List<Card>, removeCardIds: List<String>) {
+    fun updateParticipants(ticket: RatchetGroupMessage,
+                           addParticipants: List<RatchetParticipant>,
+                           removeParticipantIds: List<ByteArray>) {
         if (ticket.type != GroupMsgType.GROUP_INFO) {
             throw SecureGroupSessionException(SecureGroupSessionException.INVALID_MESSAGE_TYPE, "Ticket should be a GROUP_INFO type")
         }
@@ -241,39 +217,17 @@ class SecureGroupSession {
             throw SecureGroupSessionException(SecureGroupSessionException.NOT_CONSEQUENT_TICKET, "Ticket is not consequent")
         }
 
-        val addInfo = RatchetGroupParticipantsInfo(addCards.size.toLong())
-        val removeInfo = RatchetGroupParticipantsIds(removeCardIds.size.toLong())
+        val addInfo = RatchetGroupParticipantsInfo(addParticipants.size.toLong())
+        val removeInfo = RatchetGroupParticipantsIds(removeParticipantIds.size.toLong())
 
-        addCards.forEach { card ->
-            try {
-                val participantId = card.identifier.hexStringToByteArray()
-
-                if (card.publicKey !is VirgilPublicKey) {
-                    throw SecureGroupSessionException(
-                            SecureGroupSessionException.PUBLIC_KEY_IS_NOT_VIRGIL,
-                            "Card public key should be a VirgilPublicKey"
-                    )
-                }
-                val publicKeyData = this.crypto.exportPublicKey(card.publicKey as VirgilPublicKey)
-                addInfo.addParticipant(participantId, publicKeyData)
-            } catch (e: HexEncodingException) {
-                throw SecureGroupSessionException(
-                        SecureGroupSessionException.INVALID_CARD_ID,
-                        "Card identifier is not HEX encoded"
-                )
-            }
+        addParticipants.forEach { participant ->
+            val participantId = participant.identifier
+            val publicKeyData = this.crypto.exportPublicKey(participant.publicKey)
+            addInfo.addParticipant(participantId, publicKeyData)
         }
 
-        removeCardIds.forEach { id ->
-            try {
-                val idData = id.hexStringToByteArray()
-                removeInfo.addId(idData)
-            } catch (e: HexEncodingException) {
-                throw SecureGroupSessionException(
-                        SecureGroupSessionException.INVALID_CARD_ID,
-                        "Card identifier is not HEX encoded"
-                )
-            }
+        removeParticipantIds.forEach { id ->
+            removeInfo.addId(id)
         }
 
         this.ratchetGroupSession.updateSessionState(ticket, addInfo, removeInfo)

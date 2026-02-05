@@ -45,7 +45,6 @@ import com.virgilsecurity.ratchet.utils.hexEncodedString
 import com.virgilsecurity.sdk.crypto.KeyPairType
 import com.virgilsecurity.sdk.crypto.VirgilCrypto
 import com.virgilsecurity.sdk.crypto.VirgilPrivateKey
-import com.virgilsecurity.sdk.jwt.contract.AccessToken
 import java.util.*
 import java.util.logging.Logger
 import kotlin.math.max
@@ -55,7 +54,6 @@ import kotlin.math.max
  *
  * @param crypto VirgilCrypto instance.
  * @param identityPrivateKey Identity private key.
- * @param identityCardId Identity card id.
  * @param orphanedOneTimeKeyTtl Time that one-time key lives in the storage after been marked as orphaned in seconds.
  * @param longTermKeyTtl Time that long-term key is been used before rotation in seconds.
  * @param outdatedLongTermKeyTtl Time that long-term key lives in the storage after been marked as outdated in seconds.
@@ -67,21 +65,20 @@ import kotlin.math.max
 class KeysRotator(
         private val crypto: VirgilCrypto,
         private val identityPrivateKey: VirgilPrivateKey,
-        private val identityCardId: String,
         private val orphanedOneTimeKeyTtl: Int,
         private val longTermKeyTtl: Int,
         private val outdatedLongTermKeyTtl: Int,
         private val desiredNumberOfOneTimeKeys: Int,
         private val longTermKeysStorage: LongTermKeysStorage,
         private val oneTimeKeysStorage: OneTimeKeysStorage,
-        private val client: RatchetClientInterface
+        private val client: RatchetClientInterface?
 ) : KeysRotatorInterface {
 
     private val keyId = RatchetKeyId()
 
     @Synchronized
-    override fun rotateKeys(token: AccessToken) = object : Result<RotationLog> {
-        override fun get(): RotationLog {
+    override fun rotateKeys() = object : Result<KeyRotationResult> {
+        override fun get(): KeyRotationResult {
 
             val now = Date()
             val rotationLog = RotationLog()
@@ -139,22 +136,28 @@ class KeysRotator(
                     }
                 }
 
-                logger.fine("Validating local keys")
-                val validateResponse = this@KeysRotator.client.validatePublicKeys(
-                        lastLongTermKey?.identifier,
-                        oneTimeKeysIds,
-                        token.stringRepresentation()
-                ).get()
+                val usedOneTimeKeysIds = mutableListOf<ByteArray>()
+                var usedLongTermKeyId: ByteArray? = null
 
-                validateResponse.usedOneTimeKeysIds.forEach {
-                    logger.fine("Marking one-time key as orphaned ${it.hexEncodedString()}")
-                    this@KeysRotator.oneTimeKeysStorage.markKeyOrphaned(now, it)
-                    rotationLog.oneTimeKeysMarkedOrphaned += 1
-                    rotationLog.oneTimeKeysOrphaned += 1
+                if (this@KeysRotator.client != null) {
+                    logger.fine("Validating local keys")
+                    val validateResponse = this@KeysRotator.client.validatePublicKeys(
+                            lastLongTermKey?.identifier,
+                            oneTimeKeysIds
+                    ).get()
+
+                    validateResponse.usedOneTimeKeysIds.forEach {
+                        logger.fine("Marking one-time key as orphaned ${it.hexEncodedString()}")
+                        this@KeysRotator.oneTimeKeysStorage.markKeyOrphaned(now, it)
+                        rotationLog.oneTimeKeysMarkedOrphaned += 1
+                        rotationLog.oneTimeKeysOrphaned += 1
+                        usedOneTimeKeysIds.add(it)
+                    }
+                    usedLongTermKeyId = validateResponse.usedLongTermKeyId
                 }
 
                 var rotateLongTermKey = false
-                if (validateResponse.usedLongTermKeyId != null || lastLongTermKey == null) {
+                if (usedLongTermKeyId != null || lastLongTermKey == null) {
                     rotateLongTermKey = true
                 }
                 if (lastLongTermKey != null
@@ -179,14 +182,13 @@ class KeysRotator(
                     longTermSignedPublicKey = null
                 }
 
-                val numOfRelevantOneTimeKeys = oneTimeKeysIds.size - validateResponse.usedOneTimeKeysIds.size
+                val numOfRelevantOneTimeKeys = oneTimeKeysIds.size - usedOneTimeKeysIds.size
                 val numbOfOneTimeKeysToGen =
                         max(this@KeysRotator.desiredNumberOfOneTimeKeys - numOfRelevantOneTimeKeys, 0)
 
                 logger.fine("Generating $numbOfOneTimeKeysToGen one-time keys")
-                val oneTimePublicKeys: MutableList<ByteArray>
+                val oneTimePublicKeys = mutableListOf<ByteArray>()
                 if (numbOfOneTimeKeysToGen > 0) {
-                    val publicKeys = mutableListOf<ByteArray>()
                     for (i in 1..numbOfOneTimeKeysToGen) {
                         logger.fine("Generation $i key of $numbOfOneTimeKeysToGen")
                         val keyPair = this@KeysRotator.crypto.generateKeyPair(KeyPairType.CURVE25519)
@@ -195,29 +197,20 @@ class KeysRotator(
                         val keyId = this@KeysRotator.keyId.computePublicKeyId(oneTimePublicKey)
 
                         this@KeysRotator.oneTimeKeysStorage.storeKey(oneTimePrivateKey, keyId)
-                        publicKeys.add(oneTimePublicKey)
+                        oneTimePublicKeys.add(oneTimePublicKey)
                     }
-
-                    oneTimePublicKeys = publicKeys
-                } else {
-                    oneTimePublicKeys = mutableListOf()
                 }
-
-                logger.fine("Uploading keys")
-                this@KeysRotator.client.uploadPublicKeys(
-                        this@KeysRotator.identityCardId, longTermSignedPublicKey, oneTimePublicKeys,
-                        token.stringRepresentation()
-                ).execute()
 
                 rotationLog.oneTimeKeysAdded = oneTimePublicKeys.size
                 rotationLog.oneTimeKeysRelevant = numOfRelevantOneTimeKeys + oneTimePublicKeys.size
                 rotationLog.longTermKeysRelevant = numOfRelevantLongTermKeys + (if (longTermSignedPublicKey == null) 0 else 1)
                 rotationLog.longTermKeysAdded = if (longTermSignedPublicKey == null) 0 else 1
 
+                return KeyRotationResult(rotationLog, longTermSignedPublicKey, oneTimePublicKeys)
+
             } finally {
                 this@KeysRotator.oneTimeKeysStorage.stopInteraction()
             }
-            return rotationLog
         }
     }
 

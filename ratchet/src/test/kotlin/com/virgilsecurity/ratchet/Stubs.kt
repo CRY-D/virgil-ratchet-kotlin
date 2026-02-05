@@ -48,20 +48,13 @@ import com.virgilsecurity.ratchet.keystorage.OneTimeKeysStorage
 import com.virgilsecurity.common.model.Result
 import com.virgilsecurity.ratchet.securechat.SecureGroupSession
 import com.virgilsecurity.ratchet.securechat.SecureSession
+import com.virgilsecurity.ratchet.securechat.keysrotation.KeyRotationResult
 import com.virgilsecurity.ratchet.securechat.keysrotation.KeysRotatorInterface
 import com.virgilsecurity.ratchet.securechat.keysrotation.RotationLog
 import com.virgilsecurity.ratchet.sessionstorage.GroupSessionStorage
 import com.virgilsecurity.ratchet.sessionstorage.SessionStorage
 import com.virgilsecurity.ratchet.utils.hexEncodedString
-import com.virgilsecurity.sdk.cards.Card
-import com.virgilsecurity.sdk.cards.CardManager
-import com.virgilsecurity.sdk.cards.model.RawSignedModel
-import com.virgilsecurity.sdk.cards.validation.CardVerifier
-import com.virgilsecurity.sdk.client.VirgilCardClient
 import com.virgilsecurity.sdk.crypto.*
-import com.virgilsecurity.sdk.jwt.Jwt
-import com.virgilsecurity.sdk.jwt.contract.AccessToken
-import com.virgilsecurity.sdk.utils.Tuple
 import java.util.*
 import java.util.logging.Logger
 
@@ -203,22 +196,16 @@ class InMemoryOneTimeKeysStorage : OneTimeKeysStorage {
 }
 
 class FakeKeysRotator : KeysRotatorInterface {
-    override fun rotateKeys(token: AccessToken): Result<RotationLog> {
-        return object : Result<RotationLog> {
-            override fun get(): RotationLog {
-                return RotationLog()
+    override fun rotateKeys(): Result<KeyRotationResult> {
+        return object : Result<KeyRotationResult> {
+            override fun get(): KeyRotationResult {
+                return KeyRotationResult(RotationLog(), null, listOf())
             }
         }
     }
 }
 
-class TrustAllCardVerifier : CardVerifier {
-    override fun verifyCard(card: Card?): Boolean {
-        return true
-    }
-}
-
-class InMemoryRatchetClient(private val cardManager: CardManager) : RatchetClientInterface {
+class InMemoryRatchetClient : RatchetClientInterface {
 
     inner class UserStore {
         var identityPublicKey: VirgilPublicKey? = null
@@ -230,40 +217,27 @@ class InMemoryRatchetClient(private val cardManager: CardManager) : RatchetClien
     private val keyId = RatchetKeyId()
     private val crypto = VirgilCrypto()
     var users = mutableMapOf<String, UserStore>()
+    var currentIdentity: String? = null
 
     override fun uploadPublicKeys(
-            identityCardId: String?,
             longTermPublicKey: SignedPublicKey?,
-            oneTimePublicKeys: List<ByteArray>,
-            token: String
+            oneTimePublicKeys: List<ByteArray>
     ) = object : Completable {
         override fun execute() {
-            val jwt = Jwt(token)
-            val userStore = this@InMemoryRatchetClient.users[jwt.identity] ?: UserStore()
+            val identity = currentIdentity ?: throw RuntimeException("currentIdentity is not set")
+            val userStore = this@InMemoryRatchetClient.users[identity] ?: UserStore()
 
-            var publicKey: VirgilPublicKey
-            if (identityCardId != null) {
-                val card = this@InMemoryRatchetClient.cardManager.getCard(identityCardId)
-                publicKey = card.publicKey as VirgilPublicKey
-                userStore.identityPublicKey = publicKey
-                userStore.identityPublicKeyData = this@InMemoryRatchetClient.crypto.exportPublicKey(publicKey)
-            } else {
-                if (userStore.identityPublicKey == null) {
-                    throw RuntimeException("Identity public key is null")
-                }
-
-                publicKey = userStore.identityPublicKey!!
+            if (userStore.identityPublicKey == null) {
+                throw RuntimeException("Identity public key is null")
             }
+
+            val publicKey = userStore.identityPublicKey!!
 
             if (longTermPublicKey != null) {
                 this@InMemoryRatchetClient.crypto.verifySignature(longTermPublicKey.signature,
                                                                   longTermPublicKey.publicKey, publicKey)
 
                 userStore.longTermPublicKey = longTermPublicKey
-            } else {
-                if (userStore.longTermPublicKey == null) {
-                    throw RuntimeException("Long term key is null")
-                }
             }
 
             if (oneTimePublicKeys.isNotEmpty()) {
@@ -277,18 +251,17 @@ class InMemoryRatchetClient(private val cardManager: CardManager) : RatchetClien
                 userStore.oneTimePublicKeys.addAll(newKeysSet)
             }
 
-            this@InMemoryRatchetClient.users[jwt.identity] = userStore
+            this@InMemoryRatchetClient.users[identity] = userStore
         }
     }
 
     override fun validatePublicKeys(
             longTermKeyId: ByteArray?,
-            oneTimeKeysIds: List<ByteArray>,
-            token: String
+            oneTimeKeysIds: List<ByteArray>
     ) = object : Result<ValidatePublicKeysResponse> {
         override fun get(): ValidatePublicKeysResponse {
-            val jwt = Jwt(token)
-            val userStore = this@InMemoryRatchetClient.users[jwt.identity] ?: UserStore()
+            val identity = currentIdentity ?: throw RuntimeException("currentIdentity is not set")
+            val userStore = this@InMemoryRatchetClient.users[identity] ?: UserStore()
 
             val usedLongTermKeyId: ByteArray?
 
@@ -307,15 +280,14 @@ class InMemoryRatchetClient(private val cardManager: CardManager) : RatchetClien
         }
     }
 
-    override fun getPublicKeySet(identity: String, token: String) = object : Result<PublicKeySet> {
+    override fun getPublicKeySet(identity: String) = object : Result<PublicKeySet> {
         override fun get(): PublicKeySet {
-            Jwt(token)
             val userStore = this@InMemoryRatchetClient.users[identity] ?: UserStore()
 
             val identityPublicKey = userStore.identityPublicKeyData
             val longTermPublicKey = userStore.longTermPublicKey
             if (identityPublicKey == null || longTermPublicKey == null) {
-                throw RuntimeException()
+                throw RuntimeException("Public keys not found for $identity")
             }
 
             val oneTimePublicKey = userStore.oneTimePublicKeys.firstOrNull()
@@ -328,59 +300,20 @@ class InMemoryRatchetClient(private val cardManager: CardManager) : RatchetClien
         }
     }
 
-    override fun getMultiplePublicKeysSets(identities: List<String>, token: String)
+    override fun getMultiplePublicKeysSets(identities: List<String>)
             = object : Result<List<IdentityPublicKeySet>> {
         override fun get(): List<IdentityPublicKeySet> {
-            returnNothing()
+            return identities.map { identity ->
+                val set = getPublicKeySet(identity).get()
+                IdentityPublicKeySet(identity, set.identityPublicKey, set.longTermPublicKey, set.oneTimePublicKey)
+            }
         }
     }
 
-    override fun deleteKeysEntity(token: String) = object : Completable {
+    override fun deleteKeysEntity() = object : Completable {
         override fun execute() {
             this@InMemoryRatchetClient.users.clear()
         }
-    }
-}
-
-class InMemoryCardClient : VirgilCardClient(TestConfig.cardsServiceURL) {
-    private val crypto = VirgilCrypto()
-    private val cards = mutableMapOf<String, RawSignedModel>()
-
-    override fun getCard(cardId: String?, token: String?): Tuple<RawSignedModel, Boolean> {
-        if (this.cards.containsKey(cardId)) {
-            logger.info("Card $cardId exists")
-        } else {
-            val cardIds = this.cards.keys.joinToString()
-            logger.warning("No card $cardId betwee $cardIds")
-        }
-        val rawCard = this.cards[cardId] ?: throw RuntimeException("Card $cardId not found")
-        return Tuple(rawCard, false)
-    }
-
-    override fun searchCards(identity: String?, token: String?): MutableList<RawSignedModel> {
-        returnNothing()
-    }
-
-    override fun searchCards(identities: MutableCollection<String>?, token: String?): MutableList<RawSignedModel> {
-        returnNothing()
-    }
-
-    override fun publishCard(rawCard: RawSignedModel?, token: String?): RawSignedModel {
-        val cardId = this.crypto.computeHash(rawCard?.contentSnapshot, HashAlgorithm.SHA512).copyOfRange(0, 32)
-                .hexEncodedString()
-        logger.info("Publish card $cardId")
-
-        this.cards[cardId] = rawCard!!
-
-        return rawCard
-    }
-
-    override fun revokeCard(cardId: String?, token: String?) {
-        returnNothing()
-    }
-
-    companion object {
-        private val logger = Logger.getLogger(InMemoryCardClient::class.java.name)
     }
 }
 
@@ -409,6 +342,3 @@ fun generatePublicKeyData(): ByteArray {
     val keyPair = crypto.generateKeyPair(KeyPairType.CURVE25519)
     return crypto.exportPublicKey(keyPair.publicKey)
 }
-
-private fun returnNothing(): Nothing =
-        throw NotImplementedError("This method is supposed to not be called.")

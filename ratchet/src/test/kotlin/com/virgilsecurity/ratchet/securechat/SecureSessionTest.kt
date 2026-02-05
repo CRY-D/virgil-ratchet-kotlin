@@ -36,25 +36,21 @@ package com.virgilsecurity.ratchet.securechat
 import com.virgilsecurity.ratchet.*
 import com.virgilsecurity.ratchet.exception.SecureChatException
 import com.virgilsecurity.ratchet.securechat.keysrotation.KeysRotator
-import com.virgilsecurity.sdk.cards.Card
-import com.virgilsecurity.sdk.cards.CardManager
-import com.virgilsecurity.sdk.common.TimeSpan
 import com.virgilsecurity.sdk.crypto.KeyPairType
-import com.virgilsecurity.sdk.crypto.VirgilAccessTokenSigner
-import com.virgilsecurity.sdk.crypto.VirgilCardCrypto
-import com.virgilsecurity.sdk.jwt.JwtGenerator
-import com.virgilsecurity.sdk.jwt.accessProviders.CallbackJwtProvider
+import com.virgilsecurity.sdk.crypto.VirgilPublicKey
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.util.concurrent.TimeUnit
 
 class SecureSessionTest {
 
-    private lateinit var senderCard: Card
-    private lateinit var receiverCard: Card
+    private lateinit var senderIdentity: String
+    private lateinit var senderIdentityPublicKey: VirgilPublicKey
+    private lateinit var receiverIdentity: String
+    private lateinit var receiverIdentityPublicKey: VirgilPublicKey
     private lateinit var senderSecureChat: SecureChat
     private lateinit var receiverSecureChat: SecureChat
+    private lateinit var fakeClient: InMemoryRatchetClient
 
     @BeforeEach
     fun setup() {
@@ -62,63 +58,42 @@ class SecureSessionTest {
         val receiverIdentityKeyPair = crypto.generateKeyPair(KeyPairType.ED25519)
         val senderIdentityKeyPair = crypto.generateKeyPair(KeyPairType.ED25519)
 
-        val senderIdentity = generateIdentity()
-        val receiverIdentity = generateIdentity()
+        this.senderIdentity = generateIdentity()
+        this.receiverIdentity = generateIdentity()
+        this.senderIdentityPublicKey = senderIdentityKeyPair.publicKey
+        this.receiverIdentityPublicKey = receiverIdentityKeyPair.publicKey
 
-        val receiverTokenProvider = CallbackJwtProvider(
-                CallbackJwtProvider.GetTokenCallback {
-                    val generator = JwtGenerator(
-                            TestConfig.appId, TestConfig.appPrivateKey, TestConfig.appPublicKeyId,
-                            TimeSpan.fromTime(30, TimeUnit.MINUTES), VirgilAccessTokenSigner(crypto)
-                    )
+        this.fakeClient = InMemoryRatchetClient()
 
-                    return@GetTokenCallback generator.generateToken(receiverIdentity).stringRepresentation()
-                })
+        val senderStore = fakeClient.UserStore()
+        senderStore.identityPublicKey = senderIdentityKeyPair.publicKey
+        senderStore.identityPublicKeyData = crypto.exportPublicKey(senderIdentityKeyPair.publicKey)
+        fakeClient.users[senderIdentity] = senderStore
 
-        val senderTokenProvider = CallbackJwtProvider(
-                CallbackJwtProvider.GetTokenCallback {
-                    val generator = JwtGenerator(
-                            TestConfig.appId, TestConfig.appPrivateKey, TestConfig.appPublicKeyId,
-                            TimeSpan.fromTime(30, TimeUnit.MINUTES), VirgilAccessTokenSigner(crypto)
-                    )
-
-                    return@GetTokenCallback generator.generateToken(senderIdentity).stringRepresentation()
-                })
-
-        val cardVerifier = TrustAllCardVerifier()
-        val ramCardClient = InMemoryCardClient()
-
-        val senderCardManager = CardManager(VirgilCardCrypto(crypto), senderTokenProvider, cardVerifier, ramCardClient)
-
-        val receiverCardManager =
-                CardManager(VirgilCardCrypto(crypto), receiverTokenProvider, cardVerifier, ramCardClient)
-
-        this.receiverCard =
-                receiverCardManager.publishCard(receiverIdentityKeyPair.privateKey, receiverIdentityKeyPair.publicKey)
-        this.senderCard =
-                senderCardManager.publishCard(senderIdentityKeyPair.privateKey, senderIdentityKeyPair.publicKey)
-
-        val receiverLongTermKeysStorage = InMemoryLongTermKeysStorage()
-        val receiverOneTimeKeysStorage = InMemoryOneTimeKeysStorage()
-
-        val fakeClient = InMemoryRatchetClient(receiverCardManager)
+        val receiverStore = fakeClient.UserStore()
+        receiverStore.identityPublicKey = receiverIdentityKeyPair.publicKey
+        receiverStore.identityPublicKeyData = crypto.exportPublicKey(receiverIdentityKeyPair.publicKey)
+        fakeClient.users[receiverIdentity] = receiverStore
 
         this.senderSecureChat = SecureChat(
-                crypto, senderIdentityKeyPair.privateKey, senderCard,
-                senderTokenProvider, fakeClient, InMemoryLongTermKeysStorage(),
+                crypto, senderIdentityKeyPair.privateKey, senderIdentity,
+                fakeClient, InMemoryLongTermKeysStorage(),
                 InMemoryOneTimeKeysStorage(), InMemorySessionStorage(), InMemoryGroupSessionStorage(),
                 FakeKeysRotator()
         )
 
+        val receiverLongTermKeysStorage = InMemoryLongTermKeysStorage()
+        val receiverOneTimeKeysStorage = InMemoryOneTimeKeysStorage()
+
         val receiverKeysRotator = KeysRotator(
-                crypto, receiverIdentityKeyPair.privateKey, receiverCard.identifier, 100,
+                crypto, receiverIdentityKeyPair.privateKey, 100,
                 100, 100, 10, receiverLongTermKeysStorage,
                 receiverOneTimeKeysStorage, fakeClient
         )
 
         this.receiverSecureChat = SecureChat(
                 crypto, receiverIdentityKeyPair.privateKey,
-                receiverCard, receiverTokenProvider, fakeClient, receiverLongTermKeysStorage,
+                receiverIdentity, fakeClient, receiverLongTermKeysStorage,
                 receiverOneTimeKeysStorage, InMemorySessionStorage(),
                 InMemoryGroupSessionStorage(), receiverKeysRotator
         )
@@ -126,13 +101,16 @@ class SecureSessionTest {
 
     @Test
     fun encrypt_decrypt__random_uuid_messages_ram_client__should_decrypt() {
-        this.receiverSecureChat.rotateKeys().get()
-        val senderSession = this.senderSecureChat.startNewSessionAsSender(receiverCard).get()
+        this.fakeClient.currentIdentity = this.receiverIdentity
+        val rotationResult = this.receiverSecureChat.rotateKeys().get()
+        this.fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+
+        val senderSession = this.senderSecureChat.startNewSessionAsSender(receiverIdentity, receiverIdentityPublicKey).get()
 
         val plainText = generateText()
         val cipherText = senderSession.encrypt(plainText)
 
-        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(senderCard, cipherText)
+        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(senderIdentity, senderIdentityPublicKey, cipherText)
         val decryptedMessage = receiverSession.decryptString(cipherText)
 
         Assertions.assertEquals(plainText, decryptedMessage)
@@ -142,20 +120,22 @@ class SecureSessionTest {
 
     @Test
     fun session_persistence__random_uuid_messages_ram_client__should_decrypt() {
-        this.receiverSecureChat.rotateKeys().get()
+        this.fakeClient.currentIdentity = this.receiverIdentity
+        val rotationResult = this.receiverSecureChat.rotateKeys().get()
+        this.fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
 
-        val senderSession = this.senderSecureChat.startNewSessionAsSender(this.receiverCard).get()
+        val senderSession = this.senderSecureChat.startNewSessionAsSender(this.receiverIdentity, receiverIdentityPublicKey).get()
         this.senderSecureChat.storeSession(senderSession)
 
-        Assertions.assertNotNull(this.senderSecureChat.existingSession(this.receiverCard.identity))
+        Assertions.assertNotNull(this.senderSecureChat.existingSession(this.receiverIdentity))
 
         val plainText = generateText()
         val cipherText = senderSession.encrypt(plainText)
 
-        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(this.senderCard, cipherText)
+        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(this.senderIdentity, senderIdentityPublicKey, cipherText)
         this.receiverSecureChat.storeSession(receiverSession)
 
-        Assertions.assertNotNull(this.receiverSecureChat.existingSession(this.senderCard.identity))
+        Assertions.assertNotNull(this.receiverSecureChat.existingSession(this.senderIdentity))
 
         val decryptedMessage = receiverSession.decryptString(cipherText)
 
@@ -163,26 +143,29 @@ class SecureSessionTest {
 
         Utils.encryptDecrypt100TimesRestored(
                 this.senderSecureChat,
-                this.senderCard.identity,
+                this.senderIdentity,
                 this.receiverSecureChat,
-                this.receiverCard.identity
+                this.receiverIdentity
         )
     }
 
     @Test
     fun session_persistence__recreate_session__should_throw_error() {
-        this.receiverSecureChat.rotateKeys().get()
-        val senderSession = senderSecureChat.startNewSessionAsSender(receiverCard).get()
+        this.fakeClient.currentIdentity = this.receiverIdentity
+        val rotationResult = this.receiverSecureChat.rotateKeys().get()
+        this.fakeClient.uploadPublicKeys(rotationResult.longTermPublicKey, rotationResult.oneTimePublicKeys).execute()
+
+        val senderSession = senderSecureChat.startNewSessionAsSender(receiverIdentity, receiverIdentityPublicKey).get()
         this.senderSecureChat.storeSession(senderSession)
 
         val plainText = generateText()
         val cipherText = senderSession.encrypt(plainText)
 
-        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(senderCard, cipherText)
+        val receiverSession = this.receiverSecureChat.startNewSessionAsReceiver(senderIdentity, senderIdentityPublicKey, cipherText)
         this.receiverSecureChat.storeSession(receiverSession)
 
         try {
-            this.senderSecureChat.startNewSessionAsSender(receiverCard).get()
+            this.senderSecureChat.startNewSessionAsSender(receiverIdentity, receiverIdentityPublicKey).get()
             Assertions.fail<String>()
         } catch (e: SecureChatException) {
             Assertions.assertEquals(SecureChatException.SESSION_ALREADY_EXISTS, e.errorCode)
@@ -191,7 +174,7 @@ class SecureSessionTest {
         }
 
         try {
-            this.senderSecureChat.startNewSessionAsReceiver(receiverCard, cipherText)
+            this.senderSecureChat.startNewSessionAsReceiver(receiverIdentity, receiverIdentityPublicKey, cipherText)
             Assertions.fail<String>()
         } catch (e: SecureChatException) {
             Assertions.assertEquals(SecureChatException.SESSION_ALREADY_EXISTS, e.errorCode)
@@ -200,7 +183,7 @@ class SecureSessionTest {
         }
 
         try {
-            this.receiverSecureChat.startNewSessionAsSender(senderCard).get()
+            this.receiverSecureChat.startNewSessionAsSender(senderIdentity, senderIdentityPublicKey).get()
             Assertions.fail<String>()
         } catch (e: SecureChatException) {
             Assertions.assertEquals(SecureChatException.SESSION_ALREADY_EXISTS, e.errorCode)
@@ -208,7 +191,7 @@ class SecureSessionTest {
             Assertions.fail<String>()
         }
         try {
-            this.receiverSecureChat.startNewSessionAsReceiver(senderCard, cipherText)
+            this.receiverSecureChat.startNewSessionAsReceiver(senderIdentity, senderIdentityPublicKey, cipherText)
             Assertions.fail<String>()
         } catch (e: SecureChatException) {
             Assertions.assertEquals(SecureChatException.SESSION_ALREADY_EXISTS, e.errorCode)

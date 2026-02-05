@@ -34,37 +34,24 @@
 package com.virgilsecurity.ratchet
 
 import com.virgilsecurity.crypto.ratchet.RatchetException
-import com.virgilsecurity.ratchet.client.RatchetClient
 import com.virgilsecurity.ratchet.keystorage.FileLongTermKeysStorage
 import com.virgilsecurity.ratchet.keystorage.FileOneTimeKeysStorage
-import com.virgilsecurity.ratchet.securechat.SecureChat
-import com.virgilsecurity.ratchet.securechat.SecureGroupSession
-import com.virgilsecurity.ratchet.securechat.keysrotation.KeysRotator
+import com.virgilsecurity.ratchet.securechat.*
 import com.virgilsecurity.ratchet.sessionstorage.FileGroupSessionStorage
 import com.virgilsecurity.ratchet.sessionstorage.FileSessionStorage
-import com.virgilsecurity.ratchet.utils.hexEncodedString
-import com.virgilsecurity.sdk.cards.Card
-import com.virgilsecurity.sdk.cards.CardManager
-import com.virgilsecurity.sdk.cards.validation.VirgilCardVerifier
-import com.virgilsecurity.sdk.client.VirgilCardClient
-import com.virgilsecurity.sdk.common.TimeSpan
 import com.virgilsecurity.sdk.crypto.KeyPairType
-import com.virgilsecurity.sdk.crypto.VirgilAccessTokenSigner
-import com.virgilsecurity.sdk.crypto.VirgilCardCrypto
 import com.virgilsecurity.sdk.crypto.VirgilCrypto
-import com.virgilsecurity.sdk.jwt.JwtGenerator
-import com.virgilsecurity.sdk.jwt.accessProviders.CachingJwtProvider
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.net.URL
-import java.util.concurrent.TimeUnit
+import java.nio.file.Files
 
 class GroupIntegrationTest {
 
     private lateinit var crypto: VirgilCrypto
-    private lateinit var cards: MutableList<Card>
+    private lateinit var participants: MutableList<RatchetParticipant>
     private lateinit var chats: MutableList<SecureChat>
+    private lateinit var client: InMemoryRatchetClient
 
     @BeforeEach
     fun setup() {
@@ -72,55 +59,34 @@ class GroupIntegrationTest {
     }
 
     private fun init(numberOfParticipants: Int) {
-        val cardVerifier = VirgilCardVerifier(VirgilCardCrypto(this.crypto), true, false)
-        val client = RatchetClient(URL(TestConfig.serviceURL))
+        if (!::client.isInitialized) {
+            this.client = InMemoryRatchetClient()
+        }
 
-        this.cards = mutableListOf()
+        this.participants = mutableListOf()
         this.chats = mutableListOf()
 
         for (i in 0 until numberOfParticipants) {
             val identity = generateIdentity()
             val keyPair = this.crypto.generateKeyPair(KeyPairType.ED25519)
-            val tokenProvider = CachingJwtProvider(CachingJwtProvider.RenewJwtCallback {
-                val generator = JwtGenerator(
-                        TestConfig.appId, TestConfig.appPrivateKey, TestConfig.appPublicKeyId,
-                        TimeSpan.fromTime(30, TimeUnit.MINUTES), VirgilAccessTokenSigner(this.crypto)
-                )
+            val identifier = this.crypto.generateRandomData(32)
 
-                return@RenewJwtCallback generator.generateToken(identity)
-            })
-            val cardManager = CardManager(
-                    VirgilCardCrypto(this.crypto),
-                    tokenProvider,
-                    cardVerifier,
-                    VirgilCardClient(TestConfig.cardsServiceURL)
-            )
-            val card = cardManager.publishCard(keyPair.privateKey, keyPair.publicKey)
+            val participant = RatchetParticipant(identity, keyPair.publicKey, identifier)
+
+            val userStore = client.UserStore()
+            userStore.identityPublicKey = keyPair.publicKey
+            userStore.identityPublicKeyData = this.crypto.exportPublicKey(keyPair.publicKey)
+            client.users[identity] = userStore
 
             val longTermKeysStorage =
-                    FileLongTermKeysStorage(identity, this.crypto, keyPair, createTempDir("test").absolutePath)
+                    FileLongTermKeysStorage(identity, this.crypto, keyPair, Files.createTempDirectory("test").toAbsolutePath().toString())
             val oneTimeKeysStorage = FileOneTimeKeysStorage(identity, this.crypto, keyPair)
 
-            val keysRotator = KeysRotator(
-                    this.crypto, keyPair.privateKey, card.identifier,
-                    5, 10, 5, DESIRED_NUMBER_OF_KEYS,
-                    longTermKeysStorage, oneTimeKeysStorage, client
-            )
-
             val secureChat = SecureChat(
-                    this.crypto,
-                    keyPair.privateKey,
-                    card,
-                    tokenProvider,
-                    client,
-                    longTermKeysStorage,
-                    oneTimeKeysStorage,
-                    FileSessionStorage(identity, this.crypto, keyPair),
-                    FileGroupSessionStorage(identity, this.crypto, keyPair),
-                    keysRotator
+                    SecureChatContext(identity, keyPair, Files.createTempDirectory("test").toAbsolutePath().toString(), this.crypto, client)
             )
 
-            this.cards.add(card)
+            this.participants.add(participant)
             this.chats.add(secureChat)
         }
     }
@@ -130,7 +96,7 @@ class GroupIntegrationTest {
         val num = 10
 
         init(num)
-        val cards1 = this.cards
+        val participants1 = this.participants
         val chats1 = this.chats
 
         val sessionId = this.crypto.generateRandomData(32)
@@ -139,29 +105,29 @@ class GroupIntegrationTest {
         var sessions = mutableListOf<SecureGroupSession>()
 
         for (i in 0 until num) {
-            val localCards = cards1.toMutableList()
-            localCards.removeAt(i)
+            val localParticipants = participants1.toMutableList()
+            localParticipants.removeAt(i)
 
-            val session = chats1[i].startGroupSession(localCards, sessionId, initMsg)
+            val session = chats1[i].startGroupSession(localParticipants, sessionId, initMsg, participants1[i].identifier)
             sessions.add(session)
         }
 
         Utils.encryptDecrypt100Times(sessions)
 
         init(num)
-        val cards2 = this.cards
+        val participants2 = this.participants
         val chats2 = this.chats
 
         val ticket1 = sessions[0].createChangeParticipantsTicket()
 
         for (i in 0 until num * 2) {
             if (i < num) {
-                sessions[i].updateParticipants(ticket1, cards2, listOf())
+                sessions[i].updateParticipants(ticket1, participants2, listOf())
             } else {
-                val localCards = cards2.toMutableList()
-                localCards.removeAt(i - num)
+                val localParticipants = participants2.toMutableList()
+                localParticipants.removeAt(i - num)
 
-                val session = chats2[i - num].startGroupSession(cards1 + localCards, sessionId, ticket1)
+                val session = chats2[i - num].startGroupSession(participants1 + localParticipants, sessionId, ticket1, participants2[i - num].identifier)
 
                 sessions.add(session)
             }
@@ -170,7 +136,7 @@ class GroupIntegrationTest {
         Utils.encryptDecrypt100Times(sessions)
 
         init(num)
-        val cards3 = this.cards
+        val participants3 = this.participants
         val chats3 = this.chats
 
         val ticket2 = sessions[num].createChangeParticipantsTicket()
@@ -178,12 +144,12 @@ class GroupIntegrationTest {
 
         for (i in 0 until num * 2) {
             if (i < num) {
-                sessions[i].updateParticipants(ticket2, cards3, cards1.map { it.identifier })
+                sessions[i].updateParticipants(ticket2, participants3, participants1.map { it.identifier })
             } else {
-                val localCards = cards3.toMutableList()
-                localCards.removeAt(i - num)
+                val localParticipants = participants3.toMutableList()
+                localParticipants.removeAt(i - num)
 
-                val session = chats3[i - num].startGroupSession(cards2 + localCards, sessionId, ticket2)
+                val session = chats3[i - num].startGroupSession(participants2 + localParticipants, sessionId, ticket2, participants3[i - num].identifier)
 
                 sessions.add(session)
             }
@@ -203,43 +169,44 @@ class GroupIntegrationTest {
         var sessions = mutableListOf<SecureGroupSession>()
 
         for (i in 0 until num) {
-            val localCards = cards.toMutableList()
-            localCards.removeAt(i)
+            val localParticipants = participants.toMutableList()
+            localParticipants.removeAt(i)
 
-            val session = chats[i].startGroupSession(localCards, sessionId, initMsg)
+            val session = chats[i].startGroupSession(localParticipants, sessionId, initMsg, participants[i].identifier)
             sessions.add(session)
         }
 
         // Encrypt plaintext
         val plainText = generateText()
         val message = sessions.first().encrypt(plainText)
-        val decryptedMessage1 = sessions.last().decryptString(message, cards[0].identifier)
+        val decryptedMessage1 = sessions.last().decryptString(message, participants[0].identifier)
         Assertions.assertEquals(plainText, decryptedMessage1)
 
         // Remove user
-        val experimentalCard = cards.last()
-        val removeCardIds = listOf(experimentalCard.identifier)
+        val experimentalParticipant = participants.last()
+        val removeParticipantIds = listOf(experimentalParticipant.identifier)
 
         val removeTicket = sessions.first().createChangeParticipantsTicket()
         sessions.removeAt(sessions.size - 1)
 
         sessions.forEach { session ->
-            session.updateParticipants(removeTicket, listOf(), removeCardIds)
+            session.updateParticipants(removeTicket, listOf(), removeParticipantIds)
         }
 
         // Return user
         val addTicket = sessions.first().createChangeParticipantsTicket()
 
         sessions.forEach { session ->
-            session.updateParticipants(addTicket, listOf(experimentalCard), listOf())
+            session.updateParticipants(addTicket, listOf(), listOf()) // wait, I should add the user back
+            session.updateParticipants(addTicket, listOf(experimentalParticipant), listOf())
         }
 
-        val newSession = chats.last().startGroupSession(cards.dropLast(1), sessionId, addTicket)
+        val newSession = chats.last().startGroupSession(participants.dropLast(1), sessionId, addTicket, experimentalParticipant.identifier)
         sessions.add(newSession)
 
         // Decrypt with new session message, encrypted for old session
         try {
-            sessions.last().decryptString(message, cards[0].identifier)
+            sessions.last().decryptString(message, participants[0].identifier)
         } catch (e: RatchetException) {
             Assertions.assertEquals(RatchetException.ERROR_EPOCH_NOT_FOUND, e.statusCode)
         }
@@ -256,34 +223,34 @@ class GroupIntegrationTest {
         var sessions = mutableListOf<SecureGroupSession>()
 
         for (i in 0 until num) {
-            val localCards = cards.toMutableList()
-            localCards.removeAt(i)
+            val localParticipants = participants.toMutableList()
+            localParticipants.removeAt(i)
 
-            val session = chats[i].startGroupSession(localCards, sessionId, initMsg)
+            val session = chats[i].startGroupSession(localParticipants, sessionId, initMsg, participants[i].identifier)
             sessions.add(session)
         }
 
         for (i in 1 until 100) {
             // Remove user
-            val experimentalCard = cards.last()
-            val removeCardIds = listOf(experimentalCard.identifier)
+            val experimentalParticipant = participants.last()
+            val removeParticipantIds = listOf(experimentalParticipant.identifier)
 
             val removeTicket = sessions.first().createChangeParticipantsTicket()
 
             sessions.removeAt(sessions.size - 1)
 
             sessions.forEach { session ->
-                session.updateParticipants(removeTicket, listOf(), removeCardIds)
+                session.updateParticipants(removeTicket, listOf(), removeParticipantIds)
             }
 
             // Return user
             val addTicket = sessions.first().createChangeParticipantsTicket()
 
             sessions.forEach { session ->
-                session.updateParticipants(addTicket, listOf(experimentalCard), listOf())
+                session.updateParticipants(addTicket, listOf(experimentalParticipant), listOf())
             }
 
-            val newSession = this.chats.last().startGroupSession(cards.dropLast(1), sessionId, addTicket)
+            val newSession = this.chats.last().startGroupSession(participants.dropLast(1), sessionId, addTicket, experimentalParticipant.identifier)
             sessions.add(newSession)
         }
     }
@@ -299,10 +266,10 @@ class GroupIntegrationTest {
         val sessions = mutableListOf<SecureGroupSession>()
 
         for (i in 0 until num) {
-            val localCards = cards.toMutableList()
-            localCards.removeAt(i)
+            val localParticipants = participants.toMutableList()
+            localParticipants.removeAt(i)
 
-            val session = chats[i].startGroupSession(localCards, sessionId, initMsg)
+            val session = chats[i].startGroupSession(localParticipants, sessionId, initMsg, participants[i].identifier)
             sessions.add(session)
         }
 
@@ -322,8 +289,8 @@ class GroupIntegrationTest {
         }
 
         try {
-            val randomCardId = crypto.generateRandomData(32).hexEncodedString()
-            sessions[1].decryptString(message, randomCardId)
+            val randomId = crypto.generateRandomData(32)
+            sessions[1].decryptString(message, randomId)
             Assertions.fail<String>()
         } catch (e: RatchetException) {
             Assertions.assertEquals(RatchetException.ERROR_SENDER_NOT_FOUND, e.statusCode)
@@ -341,10 +308,10 @@ class GroupIntegrationTest {
         var sessions = mutableListOf<SecureGroupSession>()
 
         for (i in 0 until num) {
-            val localCards = this.cards.toMutableList()
-            localCards.removeAt(i)
+            val localParticipants = this.participants.toMutableList()
+            localParticipants.removeAt(i)
 
-            val session = this.chats[i].startGroupSession(localCards, sessionId, initMsg)
+            val session = this.chats[i].startGroupSession(localParticipants, sessionId, initMsg, participants[i].identifier)
             sessions.add(session)
 
             this.chats[i].storeGroupSession(session)

@@ -48,7 +48,6 @@ group 'com.virgilsecurity'
 dependencies {
     // Virgil SDK
     api "com.virgilsecurity.sdk:crypto:$versions.virgilSdk"
-    api "com.virgilsecurity.sdk:sdk:$versions.virgilSdk"
 
     // Virgil Crypto
     api "com.virgilsecurity.crypto:ratchet:$versions.virgilCrypto"
