@@ -37,6 +37,7 @@ import com.github.kittinunf.fuel.Fuel
 import com.github.kittinunf.fuel.core.Method
 import com.github.kittinunf.fuel.core.Response
 import com.github.kittinunf.fuel.core.isSuccessful
+import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.virgilsecurity.common.model.Completable
 import com.virgilsecurity.common.model.Result
@@ -44,9 +45,8 @@ import com.virgilsecurity.ratchet.build.VirgilInfo
 import com.virgilsecurity.ratchet.client.data.*
 import com.virgilsecurity.ratchet.exception.ProtocolException
 import com.virgilsecurity.ratchet.utils.OsUtils
-import com.virgilsecurity.sdk.common.ErrorResponse
-import com.virgilsecurity.sdk.utils.ConvertionUtils
 import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.util.logging.Logger
 
 /**
@@ -56,63 +56,39 @@ class RatchetClient : RatchetClientInterface {
 
     private val serviceUrl: String
     private val virgilAgentHeader: String
+    private val tokenProvider: (() -> String)?
+    private val gson = Gson()
 
     /**
      * Initializes a new `RatchetClient` instance.
      *
      * @param serviceUrl URL of service client will use.
+     * @param tokenProvider Optional token provider for authentication.
      */
     @JvmOverloads
-    constructor(serviceUrl: URL = URL(VIRGIL_API_BASE_URL), product: String = VIRGIL_AGENT_PRODUCT, version: String = VirgilInfo.VERSION) {
+    constructor(serviceUrl: URL = URL(VIRGIL_API_BASE_URL),
+                tokenProvider: (() -> String)? = null,
+                product: String = VIRGIL_AGENT_PRODUCT,
+                version: String = VirgilInfo.VERSION) {
         this.serviceUrl = serviceUrl.toString()
+        this.tokenProvider = tokenProvider
         virgilAgentHeader =
                 "$product;$VIRGIL_AGENT_FAMILY;${OsUtils.osAgentName};$version"
     }
 
-    /**
-     * Uploads public keys.
-     *
-     * Long-term public key signature should be verified.
-     * Upload priority: identity card id > long-term public key > one-time public key.
-     * Which means long-term public key can't be uploaded if identity card id is absent in the cloud and one-time
-     * public key can't be uploaded if long-term public key is absent in the cloud.
-     *
-     * @param identityCardId Identity cardId that should be available on Card service.
-     * It's public key should be ED25519.
-     * @param longTermPublicKey Long-term public key + its signature created using identity private key.
-     * Should be X25518 in PKCS#8.
-     * @param oneTimePublicKeys One-time public keys (up to 150 keys in the cloud). Should be X25518 in PKCS#8.
-     * @param token Auth token (JWT).
-     *
-     * @throws ProtocolException
-     */
     override fun uploadPublicKeys(
-            identityCardId: String?,
             longTermPublicKey: SignedPublicKey?,
-            oneTimePublicKeys: List<ByteArray>,
-            token: String
+            oneTimePublicKeys: List<ByteArray>
     ) = object : Completable {
         override fun execute() {
-            val request = UploadPublicKeysRequest(identityCardId, longTermPublicKey, oneTimePublicKeys)
-            executeRequest(PFS_BASE_URL, Method.PUT, request, token).get()
+            val request = UploadPublicKeysRequest(null, longTermPublicKey, oneTimePublicKeys)
+            executeRequest(PFS_BASE_URL, Method.PUT, request).get()
         }
     }
 
-    /**
-     * Checks list of keys ids and returns subset of that list with already used keys ids.
-     *
-     * keyId == SHA512(raw 32-byte publicKey)[0..7].
-     *
-     * @param longTermKeyId Long-term public key id to validate.
-     * @param oneTimeKeysIds List of one-time public keys ids to validate.
-     * @param token Auth token (JWT).
-     *
-     * @return Object with used keys ids.
-     */
     override fun validatePublicKeys(
             longTermKeyId: ByteArray?,
-            oneTimeKeysIds: List<ByteArray>,
-            token: String
+            oneTimeKeysIds: List<ByteArray>
     ) = object : Result<ValidatePublicKeysResponse> {
         override fun get(): ValidatePublicKeysResponse {
             if (longTermKeyId == null && oneTimeKeysIds.isEmpty()) {
@@ -120,97 +96,65 @@ class RatchetClient : RatchetClientInterface {
             }
 
             val request = ValidatePublicKeysRequest(longTermKeyId, oneTimeKeysIds)
-            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_VALIDATE, Method.POST, request, token).get()
-            val keys = ConvertionUtils.getGson().fromJson(responseBody, ValidatePublicKeysResponse::class.java)
-            return keys
+            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_VALIDATE, Method.POST, request).get()
+            return gson.fromJson(responseBody, ValidatePublicKeysResponse::class.java)
         }
     }
 
-    /**
-     * Returns public keys set for given identity.
-     *
-     * @param identity User's identity.
-     * @param token Auth token (JWT).
-     *
-     * @return Set of public keys.
-     */
-    override fun getPublicKeySet(identity: String, token: String) = object : Result<PublicKeySet> {
+    override fun getPublicKeySet(identity: String) = object : Result<PublicKeySet> {
         override fun get(): PublicKeySet {
             val request = GetPublicKeySetRequest(identity)
-            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_PICK_ONE, Method.POST, request, token).get()
+            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_PICK_ONE, Method.POST, request).get()
 
-            val keySet = ConvertionUtils.getGson().fromJson(responseBody, PublicKeySet::class.java)
-            return keySet
+            return gson.fromJson(responseBody, PublicKeySet::class.java)
         }
     }
 
-    /**
-     * Returns public keys sets for given identities.
-     *
-     * @param identities Users' identities.
-     * @param token Auth token (JWT).
-     *
-     * @return Sets of public keys.
-     */
-    override fun getMultiplePublicKeysSets(identities: List<String>,
-                                           token: String) = object : Result<List<IdentityPublicKeySet>> {
+    override fun getMultiplePublicKeysSets(identities: List<String>) = object : Result<List<IdentityPublicKeySet>> {
         override fun get(): List<IdentityPublicKeySet> {
             val request = GetMultiplePublicKeysSetsRequest(identities)
-            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_PICK_BATCH, Method.POST, request, token).get()
+            val responseBody = executeRequest(PFS_BASE_URL + ACTIONS_PICK_BATCH, Method.POST, request).get()
 
             val listType = object : TypeToken<List<IdentityPublicKeySet>>() {}.type
-            val keySet = ConvertionUtils.getGson().fromJson<List<IdentityPublicKeySet>>(responseBody, listType)
-            return keySet
+            return gson.fromJson<List<IdentityPublicKeySet>>(responseBody, listType)
         }
     }
 
-    /**
-     * Deletes keys entity.
-     *
-     * @param token Auth token (JWT).
-     */
-    override fun deleteKeysEntity(token: String) = object : Completable {
+    override fun deleteKeysEntity() = object : Completable {
         override fun execute() {
-            executeRequest(PFS_BASE_URL, Method.DELETE, null, token).get()
+            executeRequest(PFS_BASE_URL, Method.DELETE, null).get()
         }
     }
 
-    /**
-     * Throws an [ProtocolException] if the [response] is not successful.
-     */
-    @Throws(ProtocolException::class)
+    @Throws(ProtocolException)
     private fun validateResponse(response: Response) {
         if (!response.isSuccessful) {
-            val errorBody = ConvertionUtils.toString(response.data)
-            val error = ConvertionUtils.getGson().fromJson(errorBody, ErrorResponse::class.java)
-            if (error != null) {
-                throw ProtocolException(error.code, error.message)
-            } else {
-                throw ProtocolException()
-            }
+            val errorBody = String(response.data, StandardCharsets.UTF_8)
+            // Try to parse as generic error if needed, or just throw
+            throw ProtocolException(response.statusCode, "Error response from server: $errorBody")
         }
     }
 
-    /**
-     * Executes request with provided [path], [method] as [Method], [body] and [token].
-     *
-     * @throws ProtocolException If the response is not successful.
-     */
     @Throws(ProtocolException::class)
-    private fun executeRequest(path: String, method: Method, body: Any?, token: String) = object : Result<String> {
+    private fun executeRequest(path: String, method: Method, body: Any?) = object : Result<String> {
         override fun get(): String {
             logger.fine("$method $path")
             val request = Fuel.request(method, "$serviceUrl$path")
                     .header(mapOf(VIRGIL_AGENT_HEADER_KEY to virgilAgentHeader))
-                    .header(mapOf(VIRGIL_AUTHORIZATION_HEADER_KEY to "Virgil $token"))
+
+            tokenProvider?.let {
+                val token = it()
+                request.header(mapOf(VIRGIL_AUTHORIZATION_HEADER_KEY to "Virgil $token"))
+            }
+
             if (method == Method.POST || method == Method.PUT) {
-                val jsonBody = ConvertionUtils.getGson().toJson(body)
+                val jsonBody = gson.toJson(body)
                 request.jsonBody(jsonBody)
             }
             val (_, response, result) = request.response()
             validateResponse(response)
 
-            val responseBody = ConvertionUtils.toString(result.component1())
+            val responseBody = String(result.component1() ?: byteArrayOf(), StandardCharsets.UTF_8)
             logger.fine("result:\n$responseBody")
 
             return responseBody

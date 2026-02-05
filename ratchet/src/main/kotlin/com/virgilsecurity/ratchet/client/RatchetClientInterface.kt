@@ -49,22 +49,15 @@ interface RatchetClientInterface {
      * Uploads public keys.
      *
      * Long-term public key signature should be verified.
-     * Upload priority: identity card id > long-term public key > one-time public key.
-     * Which means long-term public key can't be uploaded if identity card id is absent in the cloud and one-time
-     * public key can't be uploaded if long-term public key is absent in the cloud.
+     * Upload priority: long-term public key > one-time public key.
      *
-     * @param identityCardId Identity cardId that should be available on Card service.
-     * It's public key should be ED25519.
      * @param longTermPublicKey Long-term public key + its signature created using identity private key.
      * Should be X25518 in PKCS#8.
      * @param oneTimePublicKeys One-time public keys (up to 150 keys in the cloud). Should be X25518 in PKCS#8.
-     * @param token auth token (JWT)
      */
     fun uploadPublicKeys(
-            identityCardId: String?,
             longTermPublicKey: SignedPublicKey?,
-            oneTimePublicKeys: List<ByteArray>,
-            token: String
+            oneTimePublicKeys: List<ByteArray>
     ) : Completable
 
     /**
@@ -74,40 +67,34 @@ interface RatchetClientInterface {
      *
      * @param longTermKeyId Long-term public key id to validate.
      * @param oneTimeKeysIds List of one-time public keys ids to validate.
-     * @param token Auth token (JWT).
      *
      * @return Object with used keys ids.
      */
     fun validatePublicKeys(
             longTermKeyId: ByteArray?,
-            oneTimeKeysIds: List<ByteArray>,
-            token: String
+            oneTimeKeysIds: List<ByteArray>
     ): Result<ValidatePublicKeysResponse>
 
     /**
      * Returns public keys set for given identity.
      *
      * @param identity User's identity.
-     * @param token Auth token (JWT).
      *
      * @return Set of public keys.
      */
-    fun getPublicKeySet(identity: String, token: String): Result<PublicKeySet>
+    fun getPublicKeySet(identity: String): Result<PublicKeySet>
 
     /**
      * Returns public keys sets for given identities.
      *
      * @param identities Users' identities.
-     * @param token Auth token (JWT).
      *
      * @return Sets of public keys.
      */
-    fun getMultiplePublicKeysSets(identities: List<String>, token: String): Result<List<IdentityPublicKeySet>>
+    fun getMultiplePublicKeysSets(identities: List<String>): Result<List<IdentityPublicKeySet>>
 
     /**
      * Deletes keys entity.
-     *
-     * @param token Auth token (JWT).
      */
-    fun deleteKeysEntity(token: String): Completable
+    fun deleteKeysEntity(): Completable
 }

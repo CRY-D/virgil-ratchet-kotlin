@@ -33,17 +33,17 @@
 
 package com.virgilsecurity.ratchet.securechat.keysrotation
 
-import com.virgilsecurity.common.model.Result
+import com.virgilsecurity.ratchet.client.data.SignedPublicKey
 
 /**
- * Interface for keys rotation.
+ * Result of key rotation.
+ *
+ * @property rotationLog Rotation log.
+ * @property longTermPublicKey New long-term public key (if rotated).
+ * @property oneTimePublicKeys New one-time public keys.
  */
-interface KeysRotatorInterface {
-
-    /**
-     * Rotates keys.
-     *
-     * @return Result of rotation.
-     */
-    fun rotateKeys(): Result<KeyRotationResult>
-}
+class KeyRotationResult(
+    val rotationLog: RotationLog,
+    val longTermPublicKey: SignedPublicKey?,
+    val oneTimePublicKeys: List<ByteArray>
+)

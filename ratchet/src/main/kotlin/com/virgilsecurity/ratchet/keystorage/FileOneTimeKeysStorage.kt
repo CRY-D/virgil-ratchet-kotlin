@@ -33,13 +33,13 @@
 
 package com.virgilsecurity.ratchet.keystorage
 
+import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.virgilsecurity.ratchet.exception.KeyStorageException
 import com.virgilsecurity.ratchet.utils.SecureFileSystem
 import com.virgilsecurity.ratchet.utils.hexEncodedString
 import com.virgilsecurity.sdk.crypto.VirgilCrypto
 import com.virgilsecurity.sdk.crypto.VirgilKeyPair
-import com.virgilsecurity.sdk.utils.ConvertionUtils
 import java.nio.charset.StandardCharsets
 import java.util.*
 import java.util.logging.Logger
@@ -57,6 +57,7 @@ class FileOneTimeKeysStorage(
     private val fileSystem: SecureFileSystem
     private var oneTimeKeys: OneTimeKeys? = null
     private var interactionCounter = 0
+    private val gson = Gson()
 
     init {
         val credentials = SecureFileSystem.Credentials(crypto, identityKeyPair)
@@ -78,7 +79,7 @@ class FileOneTimeKeysStorage(
             val data = fileSystem.read(ONE_TIME_KEY)
 
             oneTimeKeys = if (data.isNotEmpty()) {
-                ConvertionUtils.getGson().fromJson(data.toString(StandardCharsets.UTF_8), OneTimeKeys::class.java)
+                gson.fromJson(data.toString(StandardCharsets.UTF_8), OneTimeKeys::class.java)
             } else {
                 OneTimeKeys()
             }
@@ -104,7 +105,7 @@ class FileOneTimeKeysStorage(
                 throw KeyStorageException(KeyStorageException.ILLEGAL_STORAGE_STATE, "oneTimeKeys should not be nil")
             }
 
-            val data = ConvertionUtils.getGson().toJson(oneTimeKeys).toByteArray(StandardCharsets.UTF_8)
+            val data = gson.toJson(oneTimeKeys).toByteArray(StandardCharsets.UTF_8)
 
             fileSystem.write("OTK", data)
             oneTimeKeys = null
