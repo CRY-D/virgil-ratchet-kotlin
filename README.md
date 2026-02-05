@@ -4,7 +4,7 @@
 [![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.virgilsecurity/ratchet/badge.svg)](https://maven-badges.herokuapp.com/maven-central/com.virgilsecurity/ratchet)
 [![GitHub license](https://img.shields.io/badge/license-BSD%203--Clause-blue.svg)](https://github.com/VirgilSecurity/virgil/blob/master/LICENSE)
 
-[Introduction](#introduction) | [SDK Features](#sdk-features) | [Installation](#installation) | [Peer-to-peer Chat Example](#peer-to-peer-chat-example) | [Group Chat Example](#group-chat-example) | [Support](#support)
+[Introduction](#introduction) | [SDK Features](#sdk-features) | [Installation](#installation) | [Demos](#demos) | [Peer-to-peer Chat Example](#peer-to-peer-chat-example) | [Group Chat Example](#group-chat-example) | [Support](#support)
 
 ## Introduction
 
@@ -19,6 +19,12 @@ This version of the SDK is independent of Virgil Cloud and Virgil Cards. You can
 - manage users' one-time keys (OTK) and long-term keys (LTK)
 - enable group or peer-to-peer chat encryption
 - uses the [Virgil crypto library](https://github.com/VirgilSecurity/virgil-crypto-c)
+
+## Demos
+
+You can find complete standalone demos in the `demos/` directory:
+- **Desktop CLI Demo:** `demos/desktop-cli/src/main/kotlin/com/virgilsecurity/ratchet/demo/StandaloneDemo.kt`
+- **Android Compose Demo:** `demos/android-compose/src/main/kotlin/com/virgilsecurity/ratchet/demo/ComposeDemo.kt`
 
 ## Installation
 
